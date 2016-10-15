@@ -1,12 +1,30 @@
 #include <iostream>
 #include <cstdlib>
+#include <unistd.h>
+#include <cerrno>
 
 #include <opencv2/opencv.hpp>
 
 #include "debug.h"
+#include "ocr.h"
 
 using namespace std;
 using namespace cv;
+using namespace ocr;
+
+#define MRZ_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
+
+std::string getcwd(void) {
+    string result(1024, '\0');
+    while (getcwd(&result[0], result.size()) == 0) {
+        if( errno != ERANGE ) {
+          throw runtime_error(strerror(errno));
+        }
+        result.resize(result.size() * 2);
+    }
+    result.resize(result.find('\0'));
+    return result;
+}
 
 #if 0
 #define DISPLAY_INTERMEDIATE_IMAGES
@@ -149,9 +167,25 @@ static void process(Mat &original)
         Mat results = image.clone();
         rectangle(results, roiRect, Scalar(0, 255, 0), 2);
         // show the output images
-        display_image("Results", results);
+#ifdef DISPLAY_INTERMEDIATE_IMAGES
+        display_image("MRZ detection results", results);
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
         Mat roiImage(image, roiRect);
+#ifdef DISPLAY_INTERMEDIATE_IMAGES
         display_image("ROI", roiImage);
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
+        Mat grey, thresh;
+        cvtColor(roiImage, grey, COLOR_BGR2GRAY);
+        threshold(grey, thresh, 0, 255, THRESH_BINARY | THRESH_OTSU);
+        display_image("Threshold", thresh);
+		vector<uchar> buf;
+		imencode(".bmp", thresh, buf);
+		string data_dir = getcwd();
+		data_dir.append("/tessdata");
+		cerr << "data dir: " << data_dir << endl;
+		Recogniser tess("eng", &data_dir[0], MRZ_CHARS);
+		tess.set_image_bmp(&buf[0]);
+		tess.ocr();
     }
 
 }
