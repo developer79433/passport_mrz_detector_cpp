@@ -134,40 +134,22 @@ static void process(Mat &original)
     if (border_iter == contours.end()) {
     } else {
         // Correct ROI for border removal offset
-        roiRect.x += p;
-        roiRect.y += p;
+        roiRect += Point(p, p);
         // pad the bounding box since we applied erosions and now need
         // to re-grow it
         int pX = (roiRect.x + roiRect.size().width) * 0.03;
         int pY = (roiRect.y + roiRect.size().height) * 0.03;
-        int x = roiRect.x - pX, y = roiRect.y - pY;
-        int w = roiRect.size().width + pX * 2, h = roiRect.size().height + pY * 2;
+        roiRect -= Point(pX, pY);
+        roiRect += Size(pX * 2, pY * 2);
         // Ensure ROI is within image
-        if (x < 0) {
-            w += x;
-            x = 0;
-        }
-        if (y < 0) {
-            h += y;
-            y = 0;
-        }
-        if (x + w > image.size().width) {
-            w = image.size().width - x;
-        }
-        if (y + h > image.size().height) {
-            h = image.size().height - y;
-        }
-        roiRect.x = x;
-        roiRect.y = y;
-        roiRect.width = w;
-        roiRect.height = h;
+        roiRect &= Rect(0, 0, image.size().width, image.size().height);
  
+#ifdef DISPLAY_INTERMEDIATE_IMAGES
         // extract the ROI from the image and draw a bounding box
         // surrounding the MRZ
         Mat results = image.clone();
         rectangle(results, roiRect, Scalar(0, 255, 0), 2);
         // show the output images
-#ifdef DISPLAY_INTERMEDIATE_IMAGES
         display_image("MRZ detection results", results);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
         Mat roiImage(image, roiRect);
