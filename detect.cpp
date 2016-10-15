@@ -146,9 +146,10 @@ static void process(Mat &original)
  
         // extract the ROI from the image and draw a bounding box
         // surrounding the MRZ
-        rectangle(image, roiRect, Scalar(0, 255, 0), 2);
+        Mat results = image.clone();
+        rectangle(results, roiRect, Scalar(0, 255, 0), 2);
         // show the output images
-        display_image("Image", image);
+        display_image("Results", results);
         Mat roiImage(image, roiRect);
         display_image("ROI", roiImage);
     }
