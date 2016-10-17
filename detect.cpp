@@ -7,12 +7,15 @@
 
 #include "debug.h"
 #include "ocr.h"
+#include "mrz.h"
 
 using namespace std;
 using namespace cv;
 using namespace ocr;
 
 #define MRZ_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
+#define CHAR_SIZE_TOLERANCE 0.1
+#define MRZ_LINE_SPACING 1.0
 
 std::string getcwd(void) {
     string result(1024, '\0');
@@ -29,6 +32,201 @@ std::string getcwd(void) {
 #if 0
 #define DISPLAY_INTERMEDIATE_IMAGES
 #endif
+
+static Rect find_borders(const Mat &image)
+{
+	Mat work = image.clone();
+	vector<vector<Point> > contours;
+	findContours(work, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+	// Sort the contours in decreasing area
+	sort(contours.begin(), contours.end(), [](const vector<Point>& c1, const vector<Point>& c2) {
+		return contourArea(c1, false) > contourArea(c2, false);
+	});
+	if (contours.size() > 0) {
+		return boundingRect(contours[0]);
+	}
+	return Rect();
+}
+
+static void calc_char_cell(const Mat &image, Size &char_min, Size &char_max, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
+{
+    unsigned int min_lines, max_lines;
+    unsigned int min_chars_per_line, max_chars_per_line;
+    switch (type) {
+    case MRZ::mrz_type::TYPE_1:
+		min_chars_per_line = MRZType1::getCharsPerLine();
+		max_chars_per_line = min_chars_per_line;
+		min_lines = MRZType1::getLineCount();
+		max_lines = min_lines;
+		break;
+    case MRZ::mrz_type::TYPE_3:
+		min_chars_per_line = MRZType3::getCharsPerLine();
+		max_chars_per_line = min_chars_per_line;
+		min_lines = MRZType3::getLineCount();
+		max_lines = min_lines;
+		break;
+    case MRZ::mrz_type::UNKNOWN:
+    default:
+		min_chars_per_line = min(MRZType1::getCharsPerLine(), MRZType3::getCharsPerLine());
+		max_chars_per_line = max(MRZType1::getCharsPerLine(), MRZType3::getCharsPerLine());
+		min_lines = min(MRZType1::getLineCount(), MRZType3::getLineCount());
+		max_lines = max(MRZType1::getLineCount(), MRZType3::getLineCount());
+		break;
+    };
+    // Account for inter-line spacing
+    min_lines *= MRZ_LINE_SPACING + 1;
+    min_lines -= 1;
+    max_lines *= MRZ_LINE_SPACING + 1;
+    max_lines -= 1;
+    char_min = Size((double) image.size().width / (double) max_chars_per_line, (double) image.size().height / (double) max_lines);
+    char_max = Size((double) image.size().width / (double) min_chars_per_line, (double) image.size().height / (double) min_lines);
+    // Add a tolerance
+    char_min.width /= (1 + CHAR_SIZE_TOLERANCE);
+    char_min.height /= (1 + CHAR_SIZE_TOLERANCE);
+    char_max.width *= (1 + CHAR_SIZE_TOLERANCE);
+    char_max.height *= (1 + CHAR_SIZE_TOLERANCE);
+#if 0
+    cerr << "Char min rect: " << char_min << endl;
+    cerr << "Char max rect: " << char_max << endl;
+#endif
+    // Additional tuning for minimum width.
+    // Although OCR B is monospaced, some character glyphs are much narrower than others.
+    char_min.width *= 0.25;
+    // Additional tuning for minimum height.
+    // Line spacing varies widely.
+    char_min.height *= 0.75;
+}
+
+static bool is_character(const Rect boundingRect, const Size &minSize, const Size &maxSize)
+{
+	return
+			boundingRect.width  >= minSize.width  &&
+			boundingRect.height >= minSize.height &&
+			boundingRect.width  <= maxSize.width  &&
+			boundingRect.height <= maxSize.height
+	;
+}
+
+static void find_character_contours(const Mat &image, vector<vector<Point> > &characterContours, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
+{
+    vector<vector<Point> > contours;
+    Mat work = image.clone();
+    findContours(work, contours, RETR_EXTERNAL,
+        CHAIN_APPROX_SIMPLE);
+    Size char_min, char_max;
+    calc_char_cell(image, char_min, char_max, type);
+    copy_if(contours.begin(), contours.end(), inserter(characterContours, characterContours.begin()), [char_min, char_max](vector<Point> &contour) {
+        Rect br = boundingRect(contour);
+        if (is_character(br, char_min, char_max)) {
+            // dump_rect("Character", br);
+            return true;
+        }
+    	// Not the right size
+        // dump_rect("Rejected char", br);
+    	return false;
+    });
+}
+
+static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
+{
+    vector<vector<Point> > contours;
+    Mat work = image.clone();
+    findContours(work, contours, RETR_EXTERNAL,
+        CHAIN_APPROX_SIMPLE);
+    Size char_min, char_max;
+    calc_char_cell(image, char_min, char_max, type);
+    for_each(contours.begin(), contours.end(), [&char_bboxes, char_min, char_max](vector<Point> &contour) {
+        Rect br = boundingRect(contour);
+        if (is_character(br, char_min, char_max)) {
+            // dump_rect("Character", br);
+            char_bboxes.push_back(br);
+        } else {
+        	// Not the right size
+            // dump_rect("Rejected char", br);
+        }
+    });
+}
+
+static void count_lines(const Mat &image, const vector<Rect> &char_bboxes, unsigned int num_lines, vector<unsigned int> &line_counts, unsigned int &num_indeterminate)
+{
+	num_indeterminate = 0;
+	for (unsigned int line_num = 0; line_num < num_lines; line_num++) {
+		line_counts[line_num] = 0;
+	}
+	for_each(char_bboxes.begin(), char_bboxes.end(), [image, num_lines, &line_counts, &num_indeterminate](const Rect &bbox) {
+		unsigned int line_num;
+		bool found = false;
+		for (line_num = 0; line_num < num_lines; line_num++) {
+			int top = image.size().height * line_num / num_lines;
+			int middle = image.size().height * (line_num + 0.5) / num_lines;
+			int bottom = image.size().height * (line_num + 1) / num_lines;
+			if (
+				bbox.y >= top && bbox.y + bbox.height <= bottom &&
+				abs((bbox.y + bbox.y + bbox.height) / 2 - middle) < abs(image.size().height / (3 * num_lines))
+			) {
+				found = true;
+				break;
+			}
+		}
+		if (found) {
+			line_counts[line_num]++;
+		} else {
+			num_indeterminate++;
+		}
+	});
+}
+
+static bool looks_like_type(const Mat &image, unsigned int num_lines, unsigned int chars_per_line, const vector<Rect> &char_bboxes)
+{
+	if (char_bboxes.size() < num_lines * chars_per_line / 2) {
+		return false; // Less than 50% characters recognised
+	}
+	vector<unsigned int> line_counts(num_lines);
+	unsigned int num_indeterminate;
+	count_lines(image, char_bboxes, line_counts.size(), line_counts, num_indeterminate);
+	if (num_indeterminate > char_bboxes.size() / 10) {
+		return false; // More than 20% of characters not aligned
+	}
+	for (unsigned int line_num = 0; line_num < num_lines; line_num++) {
+		if (line_counts[line_num] > chars_per_line) {
+			return false; // Line too long
+		}
+	}
+	return true;
+}
+
+static bool looks_like_type_1(const Mat &image, const vector<Rect> &char_bboxes)
+{
+	return looks_like_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_1), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_1), char_bboxes);
+}
+
+static bool looks_like_type_3(const Mat &image, const vector<Rect> &char_bboxes)
+{
+	return looks_like_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_3), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_3), char_bboxes);
+}
+
+static void find_chars(Mat &roi_thresh)
+{
+	Rect borders = find_borders(roi_thresh);
+	// dump_rect("ROI border", borders);
+	roi_thresh = roi_thresh(borders);
+	roi_thresh = 255 - roi_thresh;
+	// display_image("Inverted cropped ROI", roi_thresh);
+	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
+    vector<Rect> bboxes;
+    find_character_bboxes(roi_thresh, bboxes, type);
+    // drawContours(roi_thresh, characterContours, -1, Scalar(127, 127, 127));
+    // drawContourBoundingRects(roi_thresh, characterContours, -1, Scalar(127, 127, 127));
+    for_each(bboxes.begin(), bboxes.end(), [&roi_thresh](const Rect &bbox) {
+    	rectangle(roi_thresh, bbox, Scalar(127, 127, 127));
+    });
+    display_image("Character contours", roi_thresh);
+    if (looks_like_type_1(roi_thresh, bboxes)) {
+    	cerr << "Looks like type 1" << endl;
+    } else if (looks_like_type_3(roi_thresh, bboxes)) {
+    	cerr << "Looks like type 3" << endl;
+    }
+}
 
 static void process(Mat &original)
 {
@@ -118,11 +316,11 @@ static void process(Mat &original)
         // compute the aspect ratio and coverage ratio of the bounding box
         // width to the width of the image
         roiRect = boundingRect(contour);
-        dump_rect("Bounding rect", roiRect);
+        // dump_rect("Bounding rect", roiRect);
         // pprint([x, y, w, h])
         double aspect = (double) roiRect.size().width / (double) roiRect.size().height;
         double coverageWidth = (double) roiRect.size().width / (double) gray.size().height;
-        cerr << "aspect=" << aspect << "; coverageWidth=" << coverageWidth << endl;
+        // cerr << "aspect=" << aspect << "; coverageWidth=" << coverageWidth << endl;
         // check to see if the aspect ratio and coverage width are within
         // acceptable criteria
         if (aspect > 5 and coverageWidth > 0.5) {
@@ -156,10 +354,13 @@ static void process(Mat &original)
 #ifdef DISPLAY_INTERMEDIATE_IMAGES
         display_image("ROI", roiImage);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
-        Mat grey, thresh;
-        cvtColor(roiImage, grey, COLOR_BGR2GRAY);
-        threshold(grey, thresh, 0, 255, THRESH_BINARY | THRESH_OTSU);
-        display_image("Threshold", thresh);
+        Mat roi_grey, roi_thresh;
+        cvtColor(roiImage, roi_grey, COLOR_BGR2GRAY);
+        threshold(roi_grey, roi_thresh, 0, 255, THRESH_BINARY | THRESH_OTSU);
+#ifdef DISPLAY_INTERMEDIATE_IMAGES
+        display_image("ROI threshold", roi_thresh);
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
+#ifdef USE_TESSERACT
 		vector<uchar> buf;
 		imencode(".bmp", thresh, buf);
 		string data_dir = getcwd();
@@ -168,6 +369,9 @@ static void process(Mat &original)
 		Recogniser tess("eng", &data_dir[0], MRZ_CHARS);
 		tess.set_image_bmp(&buf[0]);
 		tess.ocr();
+#else /* ndef USE_TESSERACT */
+		find_chars(roi_thresh);
+#endif /* ndef USE_TESSERACT */
     }
 
 }
