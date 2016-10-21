@@ -1,7 +1,5 @@
 #include <iostream>
 #include <cstdlib>
-#include <unistd.h>
-#include <cerrno>
 
 #include <opencv2/opencv.hpp>
 #include <log4cpp/Category.hh>
@@ -19,6 +17,7 @@
 #include "RecogniserKNearest.h"
 #include "find_mrz.h"
 #include "find_borders.h"
+#include "getcwd.h"
 
 using namespace std;
 using namespace cv;
@@ -27,18 +26,6 @@ using namespace ocr;
 #define CHAR_SIZE_TOLERANCE 0.1
 #define MRZ_LINE_SPACING 1.0
 #define TRAINING_DATA_FILENAME "training.data"
-
-std::string getcwd(void) {
-    string result(1024, '\0');
-    while (getcwd(&result[0], result.size()) == 0) {
-        if( errno != ERANGE ) {
-          throw runtime_error(strerror(errno));
-        }
-        result.resize(result.size() * 2);
-    }
-    result.resize(result.find('\0'));
-    return result;
-}
 
 #if 0
 #define DISPLAY_INTERMEDIATE_IMAGES
