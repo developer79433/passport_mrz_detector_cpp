@@ -25,6 +25,9 @@ using namespace std;
 using namespace cv;
 using namespace ocr;
 
+#if 0
+#define USE_TESSERACT
+#endif
 #define CHAR_SIZE_TOLERANCE 0.1
 #define MRZ_LINE_SPACING 1.0
 #define TRAINING_DATA_FILENAME "training.data"
@@ -270,11 +273,11 @@ static void process(Mat &original)
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
 #ifdef USE_TESSERACT
 		vector<uchar> buf;
-		imencode(".bmp", thresh, buf);
+		imencode(".bmp", roi_thresh, buf);
 		string data_dir = getcwd();
 		data_dir.append("/tessdata");
 		cerr << "data dir: " << data_dir << endl;
-		RecogniserTesseract tess("eng", &data_dir[0], MRZ_CHARS);
+		RecogniserTesseract tess("eng", &data_dir[0], MRZ::charset);
 		tess.set_image_bmp(&buf[0]);
 		tess.ocr();
 #else /* ndef USE_TESSERACT */
