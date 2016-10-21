@@ -1,6 +1,8 @@
 #ifndef MRZ_H
 #define MRZ_H 1
 
+#include <cassert>
+
 class MRZ {
 public:
     enum mrz_type { UNKNOWN = 0, TYPE_1 = 1, UNUSED = 2, TYPE_3 = 3 };
@@ -27,6 +29,7 @@ public:
         }
         return 0;
     };
+    static const char *charset;
     static unsigned int getCharsPerLine(void) { assert(0); };
     static unsigned int getLineCount(void) { assert(0); };
 };

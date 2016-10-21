@@ -4,18 +4,27 @@
 #include <cerrno>
 
 #include <opencv2/opencv.hpp>
+#include <log4cpp/Category.hh>
+#include <log4cpp/Appender.hh>
+#include <log4cpp/FileAppender.hh>
+#include <log4cpp/OstreamAppender.hh>
+#include <log4cpp/Layout.hh>
+#include <log4cpp/PatternLayout.hh>
+#include <log4cpp/SimpleLayout.hh>
+#include <log4cpp/Priority.hh>
 
 #include "debug.h"
 #include "ocr.h"
 #include "mrz.h"
+#include "RecogniserKNearest.h"
 
 using namespace std;
 using namespace cv;
 using namespace ocr;
 
-#define MRZ_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 #define CHAR_SIZE_TOLERANCE 0.1
 #define MRZ_LINE_SPACING 1.0
+#define TRAINING_DATA_FILENAME "training.data"
 
 std::string getcwd(void) {
     string result(1024, '\0');
@@ -107,7 +116,7 @@ static bool is_character(const Rect boundingRect, const Size &minSize, const Siz
 	;
 }
 
-static void find_character_contours(const Mat &image, vector<vector<Point> > &characterContours, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
+void find_character_contours(const Mat &image, vector<vector<Point> > &characterContours, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
 {
     vector<vector<Point> > contours;
     Mat work = image.clone();
@@ -139,6 +148,11 @@ static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes, e
         Rect br = boundingRect(contour);
         if (is_character(br, char_min, char_max)) {
             // dump_rect("Character", br);
+#if 0
+            int expand = min(br.width, br.height) / 5;
+            br -= Point(expand, expand);
+            br += Size(2 * expand, 2 * expand);
+#endif
             char_bboxes.push_back(br);
         } else {
         	// Not the right size
@@ -147,13 +161,9 @@ static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes, e
     });
 }
 
-static void count_lines(const Mat &image, const vector<Rect> &char_bboxes, unsigned int num_lines, vector<unsigned int> &line_counts, unsigned int &num_indeterminate)
+static void assign_to_lines(const Mat &image, const vector<Rect> &char_bboxes, unsigned int num_lines, vector<vector<Rect> > &lines, vector<Rect> &indeterminate)
 {
-	num_indeterminate = 0;
-	for (unsigned int line_num = 0; line_num < num_lines; line_num++) {
-		line_counts[line_num] = 0;
-	}
-	for_each(char_bboxes.begin(), char_bboxes.end(), [image, num_lines, &line_counts, &num_indeterminate](const Rect &bbox) {
+	for_each(char_bboxes.begin(), char_bboxes.end(), [image, num_lines, &lines, &indeterminate](const Rect &bbox) {
 		unsigned int line_num;
 		bool found = false;
 		for (line_num = 0; line_num < num_lines; line_num++) {
@@ -169,63 +179,101 @@ static void count_lines(const Mat &image, const vector<Rect> &char_bboxes, unsig
 			}
 		}
 		if (found) {
-			line_counts[line_num]++;
+			lines[line_num].push_back(bbox);
 		} else {
-			num_indeterminate++;
+			indeterminate.push_back(bbox);
 		}
 	});
 }
 
-static bool looks_like_type(const Mat &image, unsigned int num_lines, unsigned int chars_per_line, const vector<Rect> &char_bboxes)
+static float confidence_type(const Mat &image, unsigned int num_lines, unsigned int chars_per_line, const vector<Rect> &char_bboxes)
 {
 	if (char_bboxes.size() < num_lines * chars_per_line / 2) {
-		return false; // Less than 50% characters recognised
+		return 0; // Less than 50% characters recognised
 	}
-	vector<unsigned int> line_counts(num_lines);
-	unsigned int num_indeterminate;
-	count_lines(image, char_bboxes, line_counts.size(), line_counts, num_indeterminate);
-	if (num_indeterminate > char_bboxes.size() / 10) {
-		return false; // More than 20% of characters not aligned
+	vector<vector<Rect> > lines(num_lines);
+	vector<Rect> indeterminate;
+	assign_to_lines(image, char_bboxes, lines.size(), lines, indeterminate);
+	if (indeterminate.size() > char_bboxes.size() / 5) {
+		return 0; // More than 20% of characters not aligned
 	}
+	unsigned int num_aligned = 0;
 	for (unsigned int line_num = 0; line_num < num_lines; line_num++) {
-		if (line_counts[line_num] > chars_per_line) {
-			return false; // Line too long
+		if (lines[line_num].size() > chars_per_line) {
+			return 0; // Line too long
 		}
+		num_aligned += lines[line_num].size();
 	}
-	return true;
+	return static_cast<float>(num_aligned) / static_cast<float>(num_lines * chars_per_line);
 }
 
-static bool looks_like_type_1(const Mat &image, const vector<Rect> &char_bboxes)
+static float confidence_type_1(const Mat &image, const vector<Rect> &char_bboxes)
 {
-	return looks_like_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_1), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_1), char_bboxes);
+	return confidence_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_1), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_1), char_bboxes);
 }
 
-static bool looks_like_type_3(const Mat &image, const vector<Rect> &char_bboxes)
+static float confidence_type_3(const Mat &image, const vector<Rect> &char_bboxes)
 {
-	return looks_like_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_3), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_3), char_bboxes);
+	return confidence_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_3), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_3), char_bboxes);
 }
 
-static void find_chars(Mat &roi_thresh)
+static void fixup_missing_chars(const Mat &image, vector<Rect> &bboxes, enum MRZ::mrz_type type)
 {
-	Rect borders = find_borders(roi_thresh);
+	// unsigned int num_expected = MRZ::getLineCount(type) * MRZ::getCharsPerLine(type);
+	// TODO
+}
+
+static void find_chars(const Mat &image, vector<Rect> &bboxes)
+{
+	Rect borders = find_borders(image);
 	// dump_rect("ROI border", borders);
-	roi_thresh = roi_thresh(borders);
-	roi_thresh = 255 - roi_thresh;
-	// display_image("Inverted cropped ROI", roi_thresh);
+	Mat cropped = image(borders);
+	cropped = 255 - cropped;
+	// display_image("Inverted cropped ROI", cropped);
 	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
-    vector<Rect> bboxes;
-    find_character_bboxes(roi_thresh, bboxes, type);
-    // drawContours(roi_thresh, characterContours, -1, Scalar(127, 127, 127));
-    // drawContourBoundingRects(roi_thresh, characterContours, -1, Scalar(127, 127, 127));
-    for_each(bboxes.begin(), bboxes.end(), [&roi_thresh](const Rect &bbox) {
-    	rectangle(roi_thresh, bbox, Scalar(127, 127, 127));
+    find_character_bboxes(cropped, bboxes, type);
+#if 0
+    drawContours(cropped, characterContours, -1, Scalar(127, 127, 127));
+    drawContourBoundingRects(cropped, characterContours, -1, Scalar(127, 127, 127));
+    for_each(bboxes.begin(), bboxes.end(), [&image](const Rect &bbox) {
+    	Mat character(cropped(bbox));
+    	rectangle(cropped, bbox, Scalar(127, 127, 127));
+    	// display_image("Character", character);
     });
-    display_image("Character contours", roi_thresh);
-    if (looks_like_type_1(roi_thresh, bboxes)) {
+#endif
+    // TODO: sort(bboxes);
+    float conf_type_1 = confidence_type_1(cropped, bboxes);
+    float conf_type_3 = confidence_type_3(cropped, bboxes);
+    if (conf_type_1 > max(conf_type_3, 0.75f)) {
     	cerr << "Looks like type 1" << endl;
-    } else if (looks_like_type_3(roi_thresh, bboxes)) {
+    	type = MRZ::mrz_type::TYPE_1;
+    } else if (conf_type_3 > max(conf_type_1, 0.75f)) {
     	cerr << "Looks like type 3" << endl;
+    	type = MRZ::mrz_type::TYPE_3;
+    } else {
+    	cerr
+		<< "Indeterminate type: " << conf_type_1 << " confidence Type 1, "
+    	<< conf_type_3 << " confidence Type 3" << endl;
     }
+    fixup_missing_chars(cropped, bboxes, type);
+}
+
+static void recognise_chars(const Mat &image, const Point &off, vector<Rect> &bboxes, string &text)
+{
+#if 0
+	display_image("recognise_chars image", image);
+#endif
+    for_each(bboxes.begin(), bboxes.end(), [&image, off, &text](const Rect &bbox) {
+    	Mat character(image(bbox));
+    	char s[2] = {0, 0};
+		RecogniserKNearest recogniser(TRAINING_DATA_FILENAME);
+    	s[0] = recogniser.recognize(character, true);
+    	text.append(s);
+#if 0 || defined(DISPLAY_INTERMEDIATE_IMAGES)
+    	cerr << "Recognised char: " << s[0] << endl;
+    	display_image("Recognising", character);
+#endif /* 0 || defined(DISPLAY_INTERMEDIATE_IMAGES) */
+    });
 }
 
 static void process(Mat &original)
@@ -289,10 +337,6 @@ static void process(Mat &original)
     // included in the thresholding, so let's set 5% of the left and
     // right borders to zero
     double p = image.size().height * 0.05;
-    /*
-    thresh[:, 0:p] = 0;
-    thresh[:, image.size().height - p:] = 0;
-    */
     thresh = thresh(Rect(p, p, image.size().width - 2 * p, image.size().height - 2 * p));
 
 #ifdef DISPLAY_INTERMEDIATE_IMAGES
@@ -341,16 +385,22 @@ static void process(Mat &original)
         roiRect += Size(pX * 2, pY * 2);
         // Ensure ROI is within image
         roiRect &= Rect(0, 0, image.size().width, image.size().height);
+        // Make it relative to original image again
+        float scale = static_cast<float>(original.size().width) / static_cast<float>(image.size().width);
+        roiRect.x *= scale;
+        roiRect.y *= scale;
+        roiRect.width *= scale;
+        roiRect.height *= scale;
  
 #ifdef DISPLAY_INTERMEDIATE_IMAGES
         // extract the ROI from the image and draw a bounding box
         // surrounding the MRZ
-        Mat results = image.clone();
+        Mat results = original.clone();
         rectangle(results, roiRect, Scalar(0, 255, 0), 2);
         // show the output images
         display_image("MRZ detection results", results);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
-        Mat roiImage(image, roiRect);
+        Mat roiImage(original, roiRect);
 #ifdef DISPLAY_INTERMEDIATE_IMAGES
         display_image("ROI", roiImage);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
@@ -366,12 +416,19 @@ static void process(Mat &original)
 		string data_dir = getcwd();
 		data_dir.append("/tessdata");
 		cerr << "data dir: " << data_dir << endl;
-		Recogniser tess("eng", &data_dir[0], MRZ_CHARS);
+		RecogniserTesseract tess("eng", &data_dir[0], MRZ_CHARS);
 		tess.set_image_bmp(&buf[0]);
 		tess.ocr();
 #else /* ndef USE_TESSERACT */
-		find_chars(roi_thresh);
+		vector<Rect> char_bboxes;
+		find_chars(roi_thresh, char_bboxes);
+		string text;
+		recognise_chars(original(roiRect), roiRect.tl(), char_bboxes, text);
+		cerr << "Recognised text: " << text << endl;
 #endif /* ndef USE_TESSERACT */
+#if 1 || defined(DISPLAY_INTERMEDIATE_IMAGES)
+    display_image("Original", original);
+#endif /* 1 || DISPLAY_INTERMEDIATE_IMAGES */
     }
 
 }
@@ -395,7 +452,82 @@ static int process_cmdline_args(int argc, char *argv[])
     return ret;
 }
 
+/**
+ * OpenCV provides a class like this, but I can't get it to work.
+ * It provides images with non-NULL data, but all zeroes.
+ * So this subclass over-rides the interesting functionality
+ * in the directoryful-of-files use case with fixed versions.
+ */
+class FileCapture : public VideoCapture {
+private:
+	const char *patt;
+	unsigned int count;
+public:
+	FileCapture(const char *input_pattern)
+		: VideoCapture(), patt(input_pattern), count(0) {};
+	virtual ~FileCapture() {}
+	CV_WRAP virtual bool read(CV_OUT Mat& image) {
+		char *filename;
+		// NOTE: Use of potentially untrusted format string passed in by caller
+		asprintf(&filename, patt, count);
+		image = imread(filename);
+		bool ret = !!image.data;
+		free(filename);
+		count++;
+		return ret;
+	};
+	// We are always open, but there may not be any images when we look.
+	CV_WRAP virtual bool isOpened() const { return true; };
+};
+
+class SlidingWindowCapture : public VideoCapture {
+private:
+	Mat &img;
+	Rect current;
+	Point off;
+	unsigned int i;
+	int lim;
+public:
+	SlidingWindowCapture(Mat &image, const Rect &start_window, const Point &inter_window_offset, int num_windows = -1)
+		: img(image), current(start_window), off(inter_window_offset), i(0), lim(num_windows) {};
+	SlidingWindowCapture(Mat &image, const Size &window_size, const Point &inter_window_offset, int num_windows = -1, const Point &start_offset = Point(0, 0))
+		: img(image), current(Rect(start_offset, window_size)), off(inter_window_offset), i(0), lim(num_windows) {};
+	virtual ~SlidingWindowCapture(void) {};
+	CV_WRAP virtual bool read(CV_OUT Mat& image) {
+		if (lim >= 0 && i >= static_cast<unsigned int>(lim)) {
+			return false; // Reached frame count limit
+		}
+		if (
+			current.x < 0 || current.x + current.width > img.size().width ||
+			current.y < 0 || current.y + current.height > img.size().height
+		) {
+			return false; // Run out of image
+		}
+		image = img(current);
+		current += off;
+		return true;
+	};
+	// We are always open, but we may have run out of images.
+	CV_WRAP virtual bool isOpened() const { return true; };
+};
+
+int train(void)
+{
+	cout << getBuildInformation() << endl;
+	Mat img = imread("ocrb.png");
+	SlidingWindowCapture image_source(img, Size(70, 115), Point(70 + 2));
+	RecogniserKNearest::learnOcr(image_source, MRZ::charset, TRAINING_DATA_FILENAME);
+
+	return EXIT_SUCCESS;
+}
+
 int main(int argc, char *argv[])
 {
+	log4cpp::Appender *consoleAppender = new log4cpp::OstreamAppender("console", &std::cerr);
+	log4cpp::Category& root = log4cpp::Category::getRoot();
+	root.setPriority(log4cpp::Priority::getPriorityValue("DEBUG"));
+	consoleAppender->setLayout(new log4cpp::SimpleLayout());
+	root.addAppender(consoleAppender);
+	train();
     return process_cmdline_args(argc, argv);
 }
