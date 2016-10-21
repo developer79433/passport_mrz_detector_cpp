@@ -18,6 +18,8 @@
 #include "find_mrz.h"
 #include "find_borders.h"
 #include "getcwd.h"
+#include "file_capture.h"
+#include "sliding_window_capture.h"
 
 using namespace std;
 using namespace cv;
@@ -305,65 +307,6 @@ static int process_cmdline_args(int argc, char *argv[])
 
     return ret;
 }
-
-/**
- * OpenCV provides a class like this, but I can't get it to work.
- * It provides images with non-NULL data, but all zeroes.
- * So this subclass over-rides the interesting functionality
- * in the directoryful-of-files use case with fixed versions.
- */
-class FileCapture : public VideoCapture {
-private:
-	const char *patt;
-	unsigned int count;
-public:
-	FileCapture(const char *input_pattern)
-		: VideoCapture(), patt(input_pattern), count(0) {};
-	virtual ~FileCapture() {}
-	CV_WRAP virtual bool read(CV_OUT Mat& image) {
-		char *filename;
-		// NOTE: Use of potentially untrusted format string passed in by caller
-		asprintf(&filename, patt, count);
-		image = imread(filename);
-		bool ret = !!image.data;
-		free(filename);
-		count++;
-		return ret;
-	};
-	// We are always open, but there may not be any images when we look.
-	CV_WRAP virtual bool isOpened() const { return true; };
-};
-
-class SlidingWindowCapture : public VideoCapture {
-private:
-	Mat &img;
-	Rect current;
-	Point off;
-	unsigned int i;
-	int lim;
-public:
-	SlidingWindowCapture(Mat &image, const Rect &start_window, const Point &inter_window_offset, int num_windows = -1)
-		: img(image), current(start_window), off(inter_window_offset), i(0), lim(num_windows) {};
-	SlidingWindowCapture(Mat &image, const Size &window_size, const Point &inter_window_offset, int num_windows = -1, const Point &start_offset = Point(0, 0))
-		: img(image), current(Rect(start_offset, window_size)), off(inter_window_offset), i(0), lim(num_windows) {};
-	virtual ~SlidingWindowCapture(void) {};
-	CV_WRAP virtual bool read(CV_OUT Mat& image) {
-		if (lim >= 0 && i >= static_cast<unsigned int>(lim)) {
-			return false; // Reached frame count limit
-		}
-		if (
-			current.x < 0 || current.x + current.width > img.size().width ||
-			current.y < 0 || current.y + current.height > img.size().height
-		) {
-			return false; // Run out of image
-		}
-		image = img(current);
-		current += off;
-		return true;
-	};
-	// We are always open, but we may have run out of images.
-	CV_WRAP virtual bool isOpened() const { return true; };
-};
 
 int train(void)
 {
