@@ -1,1 +1,0 @@
-../ocrexample/RecogniserKNearest.cpp

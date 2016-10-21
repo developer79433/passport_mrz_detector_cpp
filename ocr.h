@@ -1,1 +1,0 @@
-../ocrexample/ocr.h
