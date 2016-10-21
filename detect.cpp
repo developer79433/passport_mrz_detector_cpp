@@ -258,12 +258,12 @@ static void find_chars(const Mat &image, vector<Rect> &bboxes)
     fixup_missing_chars(cropped, bboxes, type);
 }
 
-static void recognise_chars(const Mat &image, const Point &off, vector<Rect> &bboxes, string &text)
+static void recognise_chars(const Mat &image, vector<Rect> &bboxes, string &text)
 {
 #if 0
 	display_image("recognise_chars image", image);
 #endif
-    for_each(bboxes.begin(), bboxes.end(), [&image, off, &text](const Rect &bbox) {
+    for_each(bboxes.begin(), bboxes.end(), [&image, &text](const Rect &bbox) {
     	Mat character(image(bbox));
     	char s[2] = {0, 0};
 		RecogniserKNearest recogniser(TRAINING_DATA_FILENAME);
@@ -276,7 +276,7 @@ static void recognise_chars(const Mat &image, const Point &off, vector<Rect> &bb
     });
 }
 
-static void process(Mat &original)
+static bool find_mrz(const Mat &original, Mat &mrz)
 {
     // initialize a rectangular and square structuring kernel
     Mat rectKernel = getStructuringElement(MORPH_RECT, Size(13, 5));
@@ -374,33 +374,44 @@ static void process(Mat &original)
     });
 
     if (border_iter == contours.end()) {
-    } else {
-        // Correct ROI for border removal offset
-        roiRect += Point(p, p);
-        // pad the bounding box since we applied erosions and now need
-        // to re-grow it
-        int pX = (roiRect.x + roiRect.size().width) * 0.03;
-        int pY = (roiRect.y + roiRect.size().height) * 0.03;
-        roiRect -= Point(pX, pY);
-        roiRect += Size(pX * 2, pY * 2);
-        // Ensure ROI is within image
-        roiRect &= Rect(0, 0, image.size().width, image.size().height);
-        // Make it relative to original image again
-        float scale = static_cast<float>(original.size().width) / static_cast<float>(image.size().width);
-        roiRect.x *= scale;
-        roiRect.y *= scale;
-        roiRect.width *= scale;
-        roiRect.height *= scale;
- 
-#ifdef DISPLAY_INTERMEDIATE_IMAGES
-        // extract the ROI from the image and draw a bounding box
-        // surrounding the MRZ
-        Mat results = original.clone();
-        rectangle(results, roiRect, Scalar(0, 255, 0), 2);
-        // show the output images
-        display_image("MRZ detection results", results);
+    	return false;
+    }
+
+    // Correct ROI for border removal offset
+    roiRect += Point(p, p);
+    // pad the bounding box since we applied erosions and now need
+    // to re-grow it
+    int pX = (roiRect.x + roiRect.size().width) * 0.03;
+    int pY = (roiRect.y + roiRect.size().height) * 0.03;
+    roiRect -= Point(pX, pY);
+    roiRect += Size(pX * 2, pY * 2);
+    // Ensure ROI is within image
+    roiRect &= Rect(0, 0, image.size().width, image.size().height);
+    // Make it relative to original image again
+    float scale = static_cast<float>(original.size().width) / static_cast<float>(image.size().width);
+    roiRect.x *= scale;
+    roiRect.y *= scale;
+    roiRect.width *= scale;
+    roiRect.height *= scale;
+    mrz = original(roiRect);
+
+#if 0 || defined(DISPLAY_INTERMEDIATE_IMAGES)
+    // Draw a bounding box surrounding the MRZ
+    Mat display_roi = original.clone();
+    rectangle(display_roi, roiRect, Scalar(0, 255, 0), 2);
+    display_image("MRZ detection results", display_roi);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
-        Mat roiImage(original, roiRect);
+
+	return true;
+}
+
+static void process(Mat &original)
+{
+	Mat roiImage;
+	if (!find_mrz(original, roiImage)) {
+		cerr << "No MRZ found" << endl;
+		return;
+	}
 #ifdef DISPLAY_INTERMEDIATE_IMAGES
         display_image("ROI", roiImage);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
@@ -423,14 +434,12 @@ static void process(Mat &original)
 		vector<Rect> char_bboxes;
 		find_chars(roi_thresh, char_bboxes);
 		string text;
-		recognise_chars(original(roiRect), roiRect.tl(), char_bboxes, text);
+		recognise_chars(roiImage, char_bboxes, text);
 		cerr << "Recognised text: " << text << endl;
 #endif /* ndef USE_TESSERACT */
 #if 1 || defined(DISPLAY_INTERMEDIATE_IMAGES)
     display_image("Original", original);
 #endif /* 1 || DISPLAY_INTERMEDIATE_IMAGES */
-    }
-
 }
 
 static int process_cmdline_args(int argc, char *argv[])
