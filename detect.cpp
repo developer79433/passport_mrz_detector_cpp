@@ -36,7 +36,7 @@ using namespace ocr;
 #define DISPLAY_INTERMEDIATE_IMAGES
 #endif
 
-static void calc_char_cell(const Mat &image, Size &char_min, Size &char_max, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
+static void calc_char_cell(const Size &mrz_size, Size &char_min, Size &char_max, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
 {
     unsigned int min_lines, max_lines;
     unsigned int min_chars_per_line, max_chars_per_line;
@@ -66,8 +66,8 @@ static void calc_char_cell(const Mat &image, Size &char_min, Size &char_max, enu
     min_lines -= 1;
     max_lines *= MRZ_LINE_SPACING + 1;
     max_lines -= 1;
-    char_min = Size((double) image.size().width / (double) max_chars_per_line, (double) image.size().height / (double) max_lines);
-    char_max = Size((double) image.size().width / (double) min_chars_per_line, (double) image.size().height / (double) min_lines);
+    char_min = Size((double) mrz_size.width / (double) max_chars_per_line, (double) mrz_size.height / (double) max_lines);
+    char_max = Size((double) mrz_size.width / (double) min_chars_per_line, (double) mrz_size.height / (double) min_lines);
     // Add a tolerance
     char_min.width /= (1 + CHAR_SIZE_TOLERANCE);
     char_min.height /= (1 + CHAR_SIZE_TOLERANCE);
@@ -95,26 +95,6 @@ static bool is_character(const Rect boundingRect, const Size &minSize, const Siz
 	;
 }
 
-void find_character_contours(const Mat &image, vector<vector<Point> > &characterContours, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
-{
-    vector<vector<Point> > contours;
-    Mat work = image.clone();
-    findContours(work, contours, RETR_EXTERNAL,
-        CHAIN_APPROX_SIMPLE);
-    Size char_min, char_max;
-    calc_char_cell(image, char_min, char_max, type);
-    copy_if(contours.begin(), contours.end(), inserter(characterContours, characterContours.begin()), [char_min, char_max](vector<Point> &contour) {
-        Rect br = boundingRect(contour);
-        if (is_character(br, char_min, char_max)) {
-            // dump_rect("Character", br);
-            return true;
-        }
-    	// Not the right size
-        // dump_rect("Rejected char", br);
-    	return false;
-    });
-}
-
 static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes, enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
 {
     vector<vector<Point> > contours;
@@ -122,16 +102,11 @@ static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes, e
     findContours(work, contours, RETR_EXTERNAL,
         CHAIN_APPROX_SIMPLE);
     Size char_min, char_max;
-    calc_char_cell(image, char_min, char_max, type);
+    calc_char_cell(image.size(), char_min, char_max, type);
     for_each(contours.begin(), contours.end(), [&char_bboxes, char_min, char_max](vector<Point> &contour) {
         Rect br = boundingRect(contour);
         if (is_character(br, char_min, char_max)) {
             // dump_rect("Character", br);
-#if 0
-            int expand = min(br.width, br.height) / 5;
-            br -= Point(expand, expand);
-            br += Size(2 * expand, 2 * expand);
-#endif
             char_bboxes.push_back(br);
         } else {
         	// Not the right size
@@ -140,18 +115,18 @@ static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes, e
     });
 }
 
-static void assign_to_lines(const Mat &image, const vector<Rect> &char_bboxes, unsigned int num_lines, vector<vector<Rect> > &lines, vector<Rect> &indeterminate)
+static void assign_to_lines(const Size &image_size, const vector<Rect> &char_bboxes, vector<vector<Rect> > &lines, vector<Rect> &indeterminate)
 {
-	for_each(char_bboxes.begin(), char_bboxes.end(), [image, num_lines, &lines, &indeterminate](const Rect &bbox) {
+	for_each(char_bboxes.begin(), char_bboxes.end(), [image_size, &lines, &indeterminate](const Rect &bbox) {
 		unsigned int line_num;
 		bool found = false;
-		for (line_num = 0; line_num < num_lines; line_num++) {
-			int top = image.size().height * line_num / num_lines;
-			int middle = image.size().height * (line_num + 0.5) / num_lines;
-			int bottom = image.size().height * (line_num + 1) / num_lines;
+		for (line_num = 0; line_num < lines.size(); line_num++) {
+			int top = image_size.height * line_num / lines.size();
+			int middle = image_size.height * (line_num + 0.5) / lines.size();
+			int bottom = image_size.height * (line_num + 1) / lines.size();
 			if (
 				bbox.y >= top && bbox.y + bbox.height <= bottom &&
-				abs((bbox.y + bbox.y + bbox.height) / 2 - middle) < abs(image.size().height / (3 * num_lines))
+				abs((bbox.y + bbox.y + bbox.height) / 2 - middle) < abs(image_size.height / (3 * lines.size()))
 			) {
 				found = true;
 				break;
@@ -165,44 +140,42 @@ static void assign_to_lines(const Mat &image, const vector<Rect> &char_bboxes, u
 	});
 }
 
-static float confidence_type(const Mat &image, unsigned int num_lines, unsigned int chars_per_line, const vector<Rect> &char_bboxes)
+static float confidence_type(const Size &image_size, vector<vector<Rect> > &lines, unsigned int chars_per_line, const vector<Rect> &char_bboxes, vector<Rect> &indeterminate)
 {
-	if (char_bboxes.size() < num_lines * chars_per_line / 2) {
+	if (char_bboxes.size() < lines.size() * chars_per_line / 2) {
 		return 0; // Less than 50% characters recognised
 	}
-	vector<vector<Rect> > lines(num_lines);
-	vector<Rect> indeterminate;
-	assign_to_lines(image, char_bboxes, lines.size(), lines, indeterminate);
+	assign_to_lines(image_size, char_bboxes, lines, indeterminate);
 	if (indeterminate.size() > char_bboxes.size() / 5) {
 		return 0; // More than 20% of characters not aligned
 	}
 	unsigned int num_aligned = 0;
-	for (unsigned int line_num = 0; line_num < num_lines; line_num++) {
+	for (unsigned int line_num = 0; line_num < lines.size(); line_num++) {
 		if (lines[line_num].size() > chars_per_line) {
 			return 0; // Line too long
 		}
 		num_aligned += lines[line_num].size();
 	}
-	return static_cast<float>(num_aligned) / static_cast<float>(num_lines * chars_per_line);
+	return static_cast<float>(num_aligned) / static_cast<float>(lines.size() * chars_per_line);
 }
 
-static float confidence_type_1(const Mat &image, const vector<Rect> &char_bboxes)
+static float confidence_type_1(const Size &image_size, vector<vector<Rect> > &lines, const vector<Rect> &char_bboxes, vector<Rect> &indeterminate)
 {
-	return confidence_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_1), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_1), char_bboxes);
+	return confidence_type(image_size, lines, MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_1), char_bboxes, indeterminate);
 }
 
-static float confidence_type_3(const Mat &image, const vector<Rect> &char_bboxes)
+static float confidence_type_3(const Size &image_size, vector<vector<Rect> > &lines, const vector<Rect> &char_bboxes, vector<Rect> &indeterminate)
 {
-	return confidence_type(image, MRZ::getLineCount(MRZ::mrz_type::TYPE_3), MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_3), char_bboxes);
+	return confidence_type(image_size, lines, MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_3), char_bboxes, indeterminate);
 }
 
-static void fixup_missing_chars(const Mat &image, vector<Rect> &bboxes, enum MRZ::mrz_type type)
+static void fixup_missing_chars(const Mat &image, vector<vector<Rect> > &lines, enum MRZ::mrz_type type)
 {
 	// unsigned int num_expected = MRZ::getLineCount(type) * MRZ::getCharsPerLine(type);
 	// TODO
 }
 
-static void find_chars(const Mat &image, vector<Rect> &bboxes)
+static bool find_chars(const Mat &image, vector<vector<Rect> > &lines)
 {
 	Rect borders = find_borders(image);
 	// dump_rect("ROI border", borders);
@@ -210,6 +183,7 @@ static void find_chars(const Mat &image, vector<Rect> &bboxes)
 	cropped = 255 - cropped;
 	// display_image("Inverted cropped ROI", cropped);
 	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
+	vector<Rect> bboxes;
     find_character_bboxes(cropped, bboxes, type);
 #if 0
     drawContours(cropped, characterContours, -1, Scalar(127, 127, 127));
@@ -220,39 +194,53 @@ static void find_chars(const Mat &image, vector<Rect> &bboxes)
     	// display_image("Character", character);
     });
 #endif
-    // TODO: sort(bboxes);
-    float conf_type_1 = confidence_type_1(cropped, bboxes);
-    float conf_type_3 = confidence_type_3(cropped, bboxes);
+	vector<Rect> indeterminate_type_1;
+	vector<vector<Rect> > lines_type_1(MRZ::getLineCount(MRZ::mrz_type::TYPE_1));
+    float conf_type_1 = confidence_type_1(cropped.size(), lines_type_1, bboxes, indeterminate_type_1);
+	vector<Rect> indeterminate_type_3;
+	vector<vector<Rect> > lines_type_3(MRZ::getLineCount(MRZ::mrz_type::TYPE_3));
+    float conf_type_3 = confidence_type_3(cropped.size(), lines_type_3, bboxes, indeterminate_type_3);
     if (conf_type_1 > max(conf_type_3, 0.75f)) {
     	cerr << "Looks like type 1" << endl;
     	type = MRZ::mrz_type::TYPE_1;
+    	lines = lines_type_1;
     } else if (conf_type_3 > max(conf_type_1, 0.75f)) {
     	cerr << "Looks like type 3" << endl;
     	type = MRZ::mrz_type::TYPE_3;
+    	lines = lines_type_3;
     } else {
     	cerr
 		<< "Indeterminate type: " << conf_type_1 << " confidence Type 1, "
     	<< conf_type_3 << " confidence Type 3" << endl;
     }
-    fixup_missing_chars(cropped, bboxes, type);
+
+    if (type == MRZ::mrz_type::UNKNOWN) {
+    	return false;
+    }
+
+    fixup_missing_chars(cropped, lines, type);
+
+    return true;
 }
 
-static void recognise_chars(const Mat &image, vector<Rect> &bboxes, string &text)
+static void recognise_chars(const Mat &image, vector<vector<Rect> > &lines, string &text)
 {
 #if 0
 	display_image("recognise_chars image", image);
 #endif
-    for_each(bboxes.begin(), bboxes.end(), [&image, &text](const Rect &bbox) {
-    	Mat character(image(bbox));
-    	char s[2] = {0, 0};
-		RecogniserKNearest recogniser(TRAINING_DATA_FILENAME);
-    	s[0] = recogniser.recognize(character, true);
-    	text.append(s);
+	for_each(lines.begin(), lines.end(), [&image, &text](const vector<Rect> &line) {
+	    for_each(line.begin(), line.end(), [&image, &text](const Rect &bbox) {
+	    	Mat character(image(bbox));
+	    	char s[2] = {0, 0};
+			RecogniserKNearest recogniser(TRAINING_DATA_FILENAME);
+	    	s[0] = recogniser.recognize(character, true);
+	    	text.append(s);
 #if 0 || defined(DISPLAY_INTERMEDIATE_IMAGES)
-    	cerr << "Recognised char: " << s[0] << endl;
-    	display_image("Recognising", character);
+	    	cerr << "Recognised char: " << s[0] << endl;
+	    	display_image("Recognising", character);
 #endif /* 0 || defined(DISPLAY_INTERMEDIATE_IMAGES) */
-    });
+	    });
+	});
 }
 
 static void process(Mat &original)
@@ -281,15 +269,16 @@ static void process(Mat &original)
 		tess.set_image_bmp(&buf[0]);
 		tess.ocr();
 #else /* ndef USE_TESSERACT */
-		vector<Rect> char_bboxes;
-		find_chars(roi_thresh, char_bboxes);
-		string text;
-		recognise_chars(roiImage, char_bboxes, text);
-		cerr << "Recognised text: " << text << endl;
+		vector<vector<Rect> > lines;
+		if (find_chars(roi_thresh, lines)) {
+			string text;
+			recognise_chars(roiImage, lines, text);
+			cerr << "Recognised text: " << text << endl;
 #endif /* ndef USE_TESSERACT */
 #if 1 || defined(DISPLAY_INTERMEDIATE_IMAGES)
-    display_image("Original", original);
+			display_image("Original", original);
 #endif /* 1 || DISPLAY_INTERMEDIATE_IMAGES */
+		}
 }
 
 static int process_cmdline_args(int argc, char *argv[])
