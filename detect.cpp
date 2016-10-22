@@ -175,6 +175,15 @@ static void fixup_missing_chars(const Mat &image, vector<vector<Rect> > &lines, 
 	// TODO
 }
 
+static void sort_lines(vector<vector<Rect> > &lines)
+{
+	for_each(lines.begin(), lines.end(), [](vector<Rect> &line) {
+		sort(line.begin(), line.end(), [](const Rect &r1, const Rect &r2) {
+			return r1.x < r2.x;
+		});
+	});
+}
+
 static bool find_chars(const Mat &image, vector<vector<Rect> > &lines)
 {
 	Rect borders = find_borders(image);
@@ -218,6 +227,7 @@ static bool find_chars(const Mat &image, vector<vector<Rect> > &lines)
     	return false;
     }
 
+    sort_lines(lines);
     fixup_missing_chars(cropped, lines, type);
 
     return true;
