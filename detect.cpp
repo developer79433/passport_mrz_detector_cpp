@@ -256,28 +256,6 @@ static bool find_chars(const Mat &image, vector<vector<Rect> > &lines)
 	return true;
 }
 
-static void recognise_chars(const Mat &image, vector<vector<Rect> > &lines,
-		string &text)
-{
-#if 0
-	display_image("recognise_chars image", image);
-#endif
-	for_each(lines.begin(), lines.end(),
-			[&image, &text](const vector<Rect> &line) {
-				for_each(line.begin(), line.end(), [&image, &text](const Rect &bbox) {
-							Mat character(image(bbox));
-							char s[2] = {0, 0};
-							RecogniserKNearest recogniser(TRAINING_DATA_FILENAME);
-							s[0] = recogniser.recognize(character, true);
-							text.append(s);
-#if 0 || defined(DISPLAY_INTERMEDIATE_IMAGES)
-			cerr << "Recognised char: " << s[0] << endl;
-			display_image("Recognising", character);
-#endif /* 0 || defined(DISPLAY_INTERMEDIATE_IMAGES) */
-		});
-});
-}
-
 static void process(Mat &original)
 {
 	Mat roiImage;
@@ -307,7 +285,8 @@ static void process(Mat &original)
 	vector<vector<Rect> > lines;
 	if (find_chars(roi_thresh, lines)) {
 		string text;
-		recognise_chars(roiImage, lines, text);
+		RecogniserKNearest recogniser(TRAINING_DATA_FILENAME);
+		recogniser.recognise_lines(roiImage, lines, text);
 		cerr << "Recognised text: " << text << endl;
 #endif /* ndef USE_TESSERACT */
 #if 1 || defined(DISPLAY_INTERMEDIATE_IMAGES)
