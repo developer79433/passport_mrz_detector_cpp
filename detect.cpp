@@ -15,6 +15,7 @@
 #include "ocr.h"
 #include "mrz.h"
 #include "RecogniserKNearest.h"
+#include "RecogniserAbsDiff.h"
 #include "find_mrz.h"
 #include "find_borders.h"
 #include "getcwd.h"
@@ -32,7 +33,7 @@ using namespace ocr;
 #define MRZ_LINE_SPACING 1.0
 #define TRAINING_DATA_FILENAME "training.data"
 
-#if 0
+#if 1
 #define DISPLAY_INTERMEDIATE_IMAGES
 #endif
 
@@ -107,17 +108,26 @@ static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes,
 	findContours(work, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 	Size char_min, char_max;
 	calc_char_cell(image.size(), char_min, char_max, type);
-	for_each(contours.begin(), contours.end(),
-			[&char_bboxes, char_min, char_max](vector<Point> &contour) {
-				Rect br = boundingRect(contour);
-				if (is_character(br, char_min, char_max)) {
-					// dump_rect("Character", br);
-					char_bboxes.push_back(br);
-				} else {
-					// Not the right size
-					// dump_rect("Rejected char", br);
-				}
-			});
+	for_each(
+		contours.begin(), contours.end(),
+		[&char_bboxes, char_min, char_max, &work]
+		(vector<Point> &contour) {
+			Rect br = boundingRect(contour);
+			if (is_character(br, char_min, char_max)) {
+				// dump_rect("Character", br);
+#if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
+				drawContours(work, contour, -1, Scalar(1, 1, 1));
+#endif
+				char_bboxes.push_back(br);
+			} else {
+				// Not the right size
+				dump_rect("Rejected char", br);
+			}
+		}
+	);
+#if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
+	display_image("Character contours", work);
+#endif
 }
 
 static void assign_to_lines(const Size &image_size,
@@ -191,38 +201,61 @@ static float confidence_type_3(const Size &image_size,
 static void fixup_missing_chars(const Mat &image, vector<vector<Rect> > &lines,
 		enum MRZ::mrz_type type)
 {
-	// unsigned int num_expected = MRZ::getLineCount(type) * MRZ::getCharsPerLine(type);
-	// TODO
+	unsigned int num_expected = MRZ::getLineCount(type) * MRZ::getCharsPerLine(type);
+	unsigned int num_found = 0;
+	for_each(lines.begin(), lines.end(), [&num_found](vector<Rect> &line) {
+		num_found += line.size();
+	});
+	if (num_found < num_expected) {
+		cerr << "Only found " << num_found << " of " << num_expected << " chars. Interpolating." << endl;
+	}
+	unsigned int expected_width = image.cols / MRZ::getCharsPerLine(type);
+	unsigned int expected_height = image.rows / MRZ::getLineCount(type);
+	unsigned int expected_x = 0;
+	for_each(lines.begin(), lines.end(), [&num_found, lines, type](vector<Rect> &line) {
+		if (lines.size() != MRZ::getCharsPerLine(type)) {
+			// unsigned int expected_y = TODO;
+			for (vector<Rect>::size_type i = 0; i < line.size(); i++) {
+				;
+			}
+		}
+	});
 }
 
 static void sort_lines(vector<vector<Rect> > &lines)
 {
 	for_each(lines.begin(), lines.end(), [](vector<Rect> &line) {
 		sort(line.begin(), line.end(), [](const Rect &r1, const Rect &r2) {
-					return r1.x < r2.x;
-				});
+			return r1.x < r2.x;
+		});
 	});
 }
 
-static bool find_chars(const Mat &image, vector<vector<Rect> > &lines)
+static bool find_chars(
+	const Mat &image,
+#ifdef DISPLAY_INTERMEDIATE_IMAGES
+	Mat &draw_image,
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
+	vector<vector<Rect> > &lines
+)
 {
 	Rect borders = find_borders(image);
-	// dump_rect("ROI border", borders);
+	dump_rect("ROI border", borders);
 	Mat cropped = image(borders);
 	cropped = 255 - cropped;
 	// display_image("Inverted cropped ROI", cropped);
 	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
 	vector<Rect> bboxes;
 	find_character_bboxes(cropped, bboxes, type);
-#if 0
-	drawContours(cropped, characterContours, -1, Scalar(127, 127, 127));
-	drawContourBoundingRects(cropped, characterContours, -1, Scalar(127, 127, 127));
-	for_each(bboxes.begin(), bboxes.end(), [&image](const Rect &bbox) {
-				Mat character(cropped(bbox));
-				rectangle(cropped, bbox, Scalar(127, 127, 127));
-				// display_image("Character", character);
-			});
-#endif
+#if defined(DISPLAY_INTERMEDIATE_IMAGES)
+	for_each(bboxes.begin(), bboxes.end(), [&draw_image, borders](const Rect &bbox) {
+		Rect bbox_translated = bbox;
+		bbox_translated.x += borders.x;
+		bbox_translated.y += borders.y;
+		rectangle(draw_image, bbox, Scalar(0, 0, 255));
+	});
+	display_image("Char bboxes", draw_image);
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
 	vector<Rect> indeterminate_type_1;
 	vector<vector<Rect> > lines_type_1(
 			MRZ::getLineCount(MRZ::mrz_type::TYPE_1));
@@ -263,15 +296,18 @@ static void process(Mat &original)
 		cerr << "No MRZ found" << endl;
 		return;
 	}
-#ifdef DISPLAY_INTERMEDIATE_IMAGES
+#if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
 	display_image("ROI", roiImage);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
-	Mat roi_grey, roi_thresh;
+	Mat roi_grey;
 	cvtColor(roiImage, roi_grey, COLOR_BGR2GRAY);
+#if 1
+	Mat roi_thresh;
 	threshold(roi_grey, roi_thresh, 0, 255, THRESH_BINARY | THRESH_OTSU);
-#ifdef DISPLAY_INTERMEDIATE_IMAGES
+#if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
 	display_image("ROI threshold", roi_thresh);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
+#endif
 #ifdef USE_TESSERACT
 	vector<uchar> buf;
 	imencode(".bmp", roi_thresh, buf);
@@ -281,18 +317,36 @@ static void process(Mat &original)
 	RecogniserTesseract tess("eng", &data_dir[0], MRZ::charset);
 	tess.set_image_bmp(&buf[0]);
 	tess.ocr();
-#else /* ndef USE_TESSERACT */
+#elif defined(USE_K_NEAREST)
 	vector<vector<Rect> > lines;
 	if (find_chars(roi_thresh, lines)) {
 		string text;
 		RecogniserKNearest recogniser(TRAINING_DATA_FILENAME);
 		recogniser.recognise_lines(roiImage, lines, text);
 		cerr << "Recognised text: " << text << endl;
-#endif /* ndef USE_TESSERACT */
-#if 1 || defined(DISPLAY_INTERMEDIATE_IMAGES)
+#if 0 || defined(DISPLAY_INTERMEDIATE_IMAGES)
 		display_image("Original", original);
 #endif /* 1 || DISPLAY_INTERMEDIATE_IMAGES */
 	}
+#else /* !defined(USE_TESSERACT) && !defined(USE_K_NEAREST) */
+	vector<vector<Rect> > lines;
+#ifdef DISPLAY_INTERMEDIATE_IMAGES
+	Mat drawImage = roiImage.clone();
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
+	if (find_chars(
+		roi_thresh,
+#ifdef DISPLAY_INTERMEDIATE_IMAGES
+		drawImage,
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
+		lines
+		)
+	) {
+		string text;
+		RecogniserAbsDiff recogniser("ocrb.png");
+		// recogniser.recognise_lines(roi_grey, lines, text);
+		cerr << "Recognised text: " << text << endl;
+	}
+#endif /* ndef USE_TESSERACT */
 }
 
 static int process_cmdline_args(int argc, char *argv[])
@@ -316,7 +370,7 @@ static int process_cmdline_args(int argc, char *argv[])
 
 int train(void)
 {
-	cout << getBuildInformation() << endl;
+	// cout << getBuildInformation() << endl;
 	Mat img = imread("ocrb.png");
 	SlidingWindowCapture image_source(img, Size(70, 115), Point(70 + 2));
 	RecogniserKNearest::learnOcr(image_source, MRZ::charset,
