@@ -100,12 +100,12 @@ static bool is_character(const Rect boundingRect, const Size &minSize,
 			&& boundingRect.height <= maxSize.height;
 }
 
-static void find_character_bboxes(const Mat &image, vector<Rect> &char_bboxes,
+static void find_character_bboxes(const Mat &image, const Rect &borders, vector<Rect> &char_bboxes,
 		enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
 {
 	vector<vector<Point> > contours;
 	Mat work = image.clone();
-	findContours(work, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+	findContours(work, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE, borders.tl());
 	Size char_min, char_max;
 	calc_char_cell(image.size(), char_min, char_max, type);
 	for_each(
@@ -239,19 +239,18 @@ static bool find_chars(
 	vector<vector<Rect> > &lines
 )
 {
+	assert(image.size() == draw_image.size());
 	Rect borders = find_borders(image);
-	dump_rect("ROI border", borders);
 	Mat cropped = image(borders);
 	cropped = 255 - cropped;
-	// display_image("Inverted cropped ROI", cropped);
+#if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
+	display_image("Inverted cropped ROI", cropped);
+#endif /* DISPLAY_INTERMEDIATE_IMAGES */
 	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
 	vector<Rect> bboxes;
-	find_character_bboxes(cropped, bboxes, type);
+	find_character_bboxes(cropped, borders, bboxes, type);
 #if defined(DISPLAY_INTERMEDIATE_IMAGES)
 	for_each(bboxes.begin(), bboxes.end(), [&draw_image, borders](const Rect &bbox) {
-		Rect bbox_translated = bbox;
-		bbox_translated.x += borders.x;
-		bbox_translated.y += borders.y;
 		rectangle(draw_image, bbox, Scalar(0, 0, 255));
 	});
 	display_image("Char bboxes", draw_image);
