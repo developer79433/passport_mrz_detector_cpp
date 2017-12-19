@@ -1,3 +1,3 @@
 #include "mrz.h"
 
-const char *MRZ::charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<";
+std::string MRZ::charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<";

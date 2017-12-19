@@ -2,6 +2,7 @@
 #define MRZ_H 1
 
 #include <cassert>
+#include <string>
 
 class MRZ {
 public:
@@ -29,7 +30,7 @@ public:
         }
         return 0;
     };
-    static const char *charset;
+    static std::string charset;
     static unsigned int getCharsPerLine(void) { assert(0); return 0; };
     static unsigned int getLineCount(void) { assert(0); return 0; };
 };
