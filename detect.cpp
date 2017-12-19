@@ -29,7 +29,7 @@ using namespace ocr;
 #if 0
 #define USE_TESSERACT
 #endif
-#define CHAR_SIZE_TOLERANCE 0.1
+#define CHAR_SIZE_TOLERANCE 0.15
 #define MRZ_LINE_SPACING 1.0
 #define TRAINING_DATA_FILENAME "training.data"
 
@@ -198,12 +198,48 @@ static float confidence_type_3(const Size &image_size,
 			indeterminate);
 }
 
+/**
+ * Forcible assign the previously indeterminate bounding rectangles
+ * to whichever of the given lines of char bboxes they are closest to.
+ */
+void assign_indeterminate(vector<Rect> &indeterminate, vector<vector<Rect> > &lines)
+{
+	vector<unsigned int> average_line_midpoints;
+	for_each(lines.begin(), lines.end(), [&average_line_midpoints](const vector<Rect> &line) {
+		unsigned int m = 0;
+		for_each(line.begin(), line.end(), [&m](const Rect &r) {
+			m += r.y + r.height / 2;
+		});
+		average_line_midpoints.push_back(m / line.size());
+	});
+#if 0
+	for_each(average_line_midpoints.begin(), average_line_midpoints.end(), [](unsigned int average_line_midpoint) {
+		cerr << "Average line midpoint: " << average_line_midpoint << endl;
+	});
+#endif
+	for_each(indeterminate.begin(), indeterminate.end(), [&lines, average_line_midpoints](const Rect &r) {
+		unsigned int i = 0;
+		int smallest_voffset = -1;
+		unsigned int closest_line_idx = 0;
+		for_each(average_line_midpoints.begin(), average_line_midpoints.end(), [r, &i, &smallest_voffset, &closest_line_idx](unsigned int average_line_midpoint) {
+			int voffset = std::abs(r.y + r.height / 2 - static_cast<int>(average_line_midpoint));
+			if (-1 == smallest_voffset || voffset < smallest_voffset) {
+				smallest_voffset = voffset;
+				closest_line_idx = i;
+			}
+			i++;
+		});
+		lines[closest_line_idx].push_back(r);
+	});
+}
+
 static void fixup_missing_chars(const Mat &image, vector<vector<Rect> > &lines,
 		enum MRZ::mrz_type type)
 {
 	unsigned int num_expected = MRZ::getLineCount(type) * MRZ::getCharsPerLine(type);
 	unsigned int num_found = 0;
 	for_each(lines.begin(), lines.end(), [&num_found](vector<Rect> &line) {
+		// cerr << "Chars this line: " << line.size() << endl;
 		num_found += line.size();
 	});
 	if (num_found < num_expected) {
@@ -249,6 +285,7 @@ static bool find_chars(
 	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
 	vector<Rect> bboxes;
 	find_character_bboxes(cropped, borders, bboxes, type);
+	// cerr << "Bbox count: " << bboxes.size() << endl;
 #if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
 	for_each(bboxes.begin(), bboxes.end(), [&draw_image, borders](const Rect &bbox) {
 		rectangle(draw_image, bbox, Scalar(0, 0, 255));
@@ -269,10 +306,12 @@ static bool find_chars(
 		cerr << "Looks like type 1" << endl;
 		type = MRZ::mrz_type::TYPE_1;
 		lines = lines_type_1;
+		assign_indeterminate(indeterminate_type_1, lines);
 	} else if (conf_type_3 > max(conf_type_1, 0.75f)) {
 		cerr << "Looks like type 3" << endl;
 		type = MRZ::mrz_type::TYPE_3;
 		lines = lines_type_3;
+		assign_indeterminate(indeterminate_type_3, lines);
 	} else {
 		cerr << "Indeterminate type: " << conf_type_1 << " confidence Type 1, "
 				<< conf_type_3 << " confidence Type 3" << endl;
