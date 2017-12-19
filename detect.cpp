@@ -249,7 +249,7 @@ static bool find_chars(
 	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
 	vector<Rect> bboxes;
 	find_character_bboxes(cropped, borders, bboxes, type);
-#if defined(DISPLAY_INTERMEDIATE_IMAGES)
+#if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
 	for_each(bboxes.begin(), bboxes.end(), [&draw_image, borders](const Rect &bbox) {
 		rectangle(draw_image, bbox, Scalar(0, 0, 255));
 	});
@@ -341,8 +341,8 @@ static void process(Mat &original)
 		)
 	) {
 		string text;
-		RecogniserAbsDiff recogniser("ocrb.png");
-		// recogniser.recognise_lines(roi_grey, lines, text);
+		RecogniserAbsDiff recogniser(MRZ::charset, "OCRB");
+		recogniser.recognise(roi_grey, lines, text);
 		cerr << "Recognised text: " << text << endl;
 	}
 #endif /* ndef USE_TESSERACT */
@@ -386,6 +386,6 @@ int main(int argc, char *argv[])
 	root.setPriority(log4cpp::Priority::getPriorityValue("DEBUG"));
 	consoleAppender->setLayout(new log4cpp::SimpleLayout());
 	root.addAppender(consoleAppender);
-	train();
+	// train();
 	return process_cmdline_args(argc, argv);
 }
