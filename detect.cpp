@@ -38,33 +38,21 @@ using namespace ocr;
 #endif
 
 static void calc_char_cell(const Size &mrz_size, Size &char_min, Size &char_max,
-		enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
+		MRZ *mrz = NULL)
 {
 	unsigned int min_lines, max_lines;
 	unsigned int min_chars_per_line, max_chars_per_line;
-	switch (type) {
-	case MRZ::mrz_type::TYPE_1:
-		min_chars_per_line = MRZType1::getCharsPerLine();
+	if (NULL == mrz) {
+		min_chars_per_line = MRZ::getMinCharsPerLine();
+		max_chars_per_line = MRZ::getMaxCharsPerLine();
+		min_lines = MRZ::getMinLineCount();
+		max_lines = MRZ::getMaxLineCount();
+	} else {
+		min_chars_per_line = mrz->getCharsPerLine();
 		max_chars_per_line = min_chars_per_line;
-		min_lines = MRZType1::getLineCount();
+		min_lines = mrz->getLineCount();
 		max_lines = min_lines;
-		break;
-	case MRZ::mrz_type::TYPE_3:
-		min_chars_per_line = MRZType3::getCharsPerLine();
-		max_chars_per_line = min_chars_per_line;
-		min_lines = MRZType3::getLineCount();
-		max_lines = min_lines;
-		break;
-	case MRZ::mrz_type::UNKNOWN:
-	default:
-		min_chars_per_line = min(MRZType1::getCharsPerLine(),
-				MRZType3::getCharsPerLine());
-		max_chars_per_line = max(MRZType1::getCharsPerLine(),
-				MRZType3::getCharsPerLine());
-		min_lines = min(MRZType1::getLineCount(), MRZType3::getLineCount());
-		max_lines = max(MRZType1::getLineCount(), MRZType3::getLineCount());
-		break;
-	};
+	}
 	// Account for inter-line spacing
 	min_lines *= MRZ_LINE_SPACING + 1;
 	min_lines -= 1;
@@ -101,13 +89,13 @@ static bool is_character(const Rect boundingRect, const Size &minSize,
 }
 
 static void find_character_bboxes(const Mat &image, const Rect &borders, vector<Rect> &char_bboxes,
-		enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN)
+		MRZ *mrz = NULL)
 {
 	vector<vector<Point> > contours;
 	Mat work = image.clone();
 	findContours(work, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE, borders.tl());
 	Size char_min, char_max;
-	calc_char_cell(image.size(), char_min, char_max, type);
+	calc_char_cell(image.size(), char_min, char_max, mrz);
 	for_each(
 		contours.begin(), contours.end(),
 		[&char_bboxes, char_min, char_max, &work]
@@ -180,24 +168,6 @@ static float confidence_type(const Size &image_size,
 			/ static_cast<float>(lines.size() * chars_per_line);
 }
 
-static float confidence_type_1(const Size &image_size,
-		vector<vector<Rect> > &lines, const vector<Rect> &char_bboxes,
-		vector<Rect> &indeterminate)
-{
-	return confidence_type(image_size, lines,
-			MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_1), char_bboxes,
-			indeterminate);
-}
-
-static float confidence_type_3(const Size &image_size,
-		vector<vector<Rect> > &lines, const vector<Rect> &char_bboxes,
-		vector<Rect> &indeterminate)
-{
-	return confidence_type(image_size, lines,
-			MRZ::getCharsPerLine(MRZ::mrz_type::TYPE_3), char_bboxes,
-			indeterminate);
-}
-
 /**
  * Forcible assign the previously indeterminate bounding rectangles
  * to whichever of the given lines of char bboxes they are closest to.
@@ -234,9 +204,9 @@ void assign_indeterminate(vector<Rect> &indeterminate, vector<vector<Rect> > &li
 }
 
 static void fixup_missing_chars(const Mat &image, vector<vector<Rect> > &lines,
-		enum MRZ::mrz_type type)
+		MRZ &mrz)
 {
-	unsigned int num_expected = MRZ::getLineCount(type) * MRZ::getCharsPerLine(type);
+	unsigned int num_expected = mrz.getLineCount() * mrz.getCharsPerLine();
 	unsigned int num_found = 0;
 	for_each(lines.begin(), lines.end(), [&num_found](vector<Rect> &line) {
 		// cerr << "Chars this line: " << line.size() << endl;
@@ -245,11 +215,12 @@ static void fixup_missing_chars(const Mat &image, vector<vector<Rect> > &lines,
 	if (num_found < num_expected) {
 		cerr << "Only found " << num_found << " of " << num_expected << " chars. Interpolating." << endl;
 	}
-	unsigned int expected_width = image.cols / MRZ::getCharsPerLine(type);
-	unsigned int expected_height = image.rows / MRZ::getLineCount(type);
+	unsigned int expected_width = image.cols / mrz.getCharsPerLine();
+	unsigned int expected_height = image.rows / mrz.getLineCount();
 	unsigned int expected_x = 0;
-	for_each(lines.begin(), lines.end(), [&num_found, lines, type](vector<Rect> &line) {
-		if (lines.size() != MRZ::getCharsPerLine(type)) {
+	MRZ *pmrz = &mrz;
+	for_each(lines.begin(), lines.end(), [&num_found, lines, pmrz](vector<Rect> &line) {
+		if (lines.size() != pmrz->getCharsPerLine()) {
 			// unsigned int expected_y = TODO;
 			for (vector<Rect>::size_type i = 0; i < line.size(); i++) {
 				;
@@ -282,9 +253,8 @@ static bool find_chars(
 #if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
 	display_image("Inverted cropped ROI", cropped);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
-	enum MRZ::mrz_type type = MRZ::mrz_type::UNKNOWN;
 	vector<Rect> bboxes;
-	find_character_bboxes(cropped, borders, bboxes, type);
+	find_character_bboxes(cropped, borders, bboxes);
 	// cerr << "Bbox count: " << bboxes.size() << endl;
 #if 0 && defined(DISPLAY_INTERMEDIATE_IMAGES)
 	for_each(bboxes.begin(), bboxes.end(), [&draw_image, borders](const Rect &bbox) {
@@ -292,37 +262,52 @@ static bool find_chars(
 	});
 	display_image("Char bboxes", draw_image);
 #endif /* DISPLAY_INTERMEDIATE_IMAGES */
+	MRZ *chosen_mrz = NULL;
+	MRZType1 mrz1;
+	MRZType2 mrz2;
+	MRZType3 mrz3;
 	vector<Rect> indeterminate_type_1;
 	vector<vector<Rect> > lines_type_1(
-			MRZ::getLineCount(MRZ::mrz_type::TYPE_1));
-	float conf_type_1 = confidence_type_1(cropped.size(), lines_type_1, bboxes,
+			mrz1.getLineCount());
+	float conf_type_1 = confidence_type(cropped.size(), lines_type_1, mrz1.getCharsPerLine(), bboxes,
 			indeterminate_type_1);
+	vector<Rect> indeterminate_type_2;
+	vector<vector<Rect> > lines_type_2(
+			mrz2.getLineCount());
+	float conf_type_2 = confidence_type(cropped.size(), lines_type_2, mrz2.getCharsPerLine(), bboxes,
+			indeterminate_type_2);
 	vector<Rect> indeterminate_type_3;
 	vector<vector<Rect> > lines_type_3(
-			MRZ::getLineCount(MRZ::mrz_type::TYPE_3));
-	float conf_type_3 = confidence_type_3(cropped.size(), lines_type_3, bboxes,
+			mrz3.getLineCount());
+	float conf_type_3 = confidence_type(cropped.size(), lines_type_3, mrz3.getCharsPerLine(), bboxes,
 			indeterminate_type_3);
-	if (conf_type_1 > max(conf_type_3, 0.75f)) {
+	if (conf_type_1 > max({ conf_type_2, conf_type_3, 0.75f })) {
 		cerr << "Looks like type 1" << endl;
-		type = MRZ::mrz_type::TYPE_1;
+		chosen_mrz = &mrz1;
 		lines = lines_type_1;
 		assign_indeterminate(indeterminate_type_1, lines);
-	} else if (conf_type_3 > max(conf_type_1, 0.75f)) {
+	} else if (conf_type_2 > max({ conf_type_1, conf_type_3, 0.75f })) {
+		cerr << "Looks like type 2" << endl;
+		chosen_mrz = &mrz2;
+		lines = lines_type_2;
+		assign_indeterminate(indeterminate_type_2, lines);
+	} else if (conf_type_3 > max({ conf_type_1, conf_type_2, 0.75f })) {
 		cerr << "Looks like type 3" << endl;
-		type = MRZ::mrz_type::TYPE_3;
+		chosen_mrz = &mrz3;
 		lines = lines_type_3;
 		assign_indeterminate(indeterminate_type_3, lines);
 	} else {
 		cerr << "Indeterminate type: " << conf_type_1 << " confidence Type 1, "
+				<< conf_type_2 << " confidence Type 2, "
 				<< conf_type_3 << " confidence Type 3" << endl;
 	}
 
-	if (type == MRZ::mrz_type::UNKNOWN) {
+	if (NULL == chosen_mrz) {
 		return false;
 	}
 
 	sort_lines(lines);
-	fixup_missing_chars(cropped, lines, type);
+	fixup_missing_chars(cropped, lines, *chosen_mrz);
 
 	return true;
 }

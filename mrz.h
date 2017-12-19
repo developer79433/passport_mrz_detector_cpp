@@ -6,45 +6,33 @@
 
 class MRZ {
 public:
-    enum mrz_type { UNKNOWN = 0, TYPE_1 = 1, UNUSED = 2, TYPE_3 = 3 };
-    MRZ(void);
-    static unsigned int getCharsPerLine(enum mrz_type type) {
-        switch (type) {
-        case TYPE_1:
-            return 30;
-        case TYPE_3:
-            return 44;
-        default:
-            break;
-        }
-        return 0;
-    };
-    static unsigned int getLineCount(enum mrz_type type) {
-        switch (type) {
-        case TYPE_1:
-            return 3;
-        case TYPE_3:
-            return 2;
-        default:
-            break;
-        }
-        return 0;
-    };
-    static std::string charset;
-    static unsigned int getCharsPerLine(void) { assert(0); return 0; };
-    static unsigned int getLineCount(void) { assert(0); return 0; };
+    MRZ(void) {};
+    virtual ~MRZ() {};
+    static unsigned int getMinCharsPerLine(void) { return 30; }
+    static unsigned int getMaxCharsPerLine(void) { return 44; }
+    static unsigned int getMinLineCount(void) { return 2; }
+    static unsigned int getMaxLineCount(void) { return 3; }
+	virtual unsigned int getCharsPerLine(void) const = 0;
+	virtual unsigned int getLineCount(void) const = 0;
+    static const std::string charset;
 };
 
 class MRZType1 : public MRZ {
 public:
-    static unsigned int getCharsPerLine(void) { return 30; };
-    static unsigned int getLineCount(void) { return 3; };
+	virtual unsigned int getCharsPerLine(void) const { return 30; };
+	virtual unsigned int getLineCount(void) const { return 3; };
+};
+
+class MRZType2 : public MRZ {
+public:
+	virtual unsigned int getCharsPerLine(void) const { return 36; };
+	virtual unsigned int getLineCount(void) const { return 2; };
 };
 
 class MRZType3 : public MRZ {
 public:
-    static unsigned int getCharsPerLine(void) { return 44; };
-    static unsigned int getLineCount(void) { return 2; };
+	virtual unsigned int getCharsPerLine(void) const { return 44; };
+	virtual unsigned int getLineCount(void) const { return 2; };
 };
 
 #endif /* MRZ_H */
